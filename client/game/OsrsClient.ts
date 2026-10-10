@@ -6459,10 +6459,9 @@ export class OsrsClient {
     ): "new_user" | "existing_user" | "login" | "cancel" | "connect" | undefined {
         switch (action.type) {
             case "new_user":
-                console.log("[Login] New user clicked - would open registration");
-                this.loginState.virtualKeyboardVisible = false;
-                return "new_user";
-
+                // The server registers an account on first login with an unknown name
+                // (see NetworkBuilder.login), so both entry points share the form.
+                // eslint-disable-next-line no-fallthrough
             case "existing_user":
                 this.loginState.promptCredentials();
                 if (isMobileMode) {
@@ -6472,7 +6471,7 @@ export class OsrsClient {
                 } else {
                     this.loginState.virtualKeyboardVisible = false;
                 }
-                return "existing_user";
+                return action.type;
 
             case "login":
                 // Prevent double-clicking login while already connecting
