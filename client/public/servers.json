@@ -1,5 +1,11 @@
 [
     {
+        "name": "Korefox",
+        "address": "rs.korefox.com/game",
+        "secure": true,
+        "maxPlayers": 2047
+    },
+    {
         "name": "Local Development",
         "address": "localhost:43594",
         "secure": false,
