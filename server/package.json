@@ -40,6 +40,7 @@
     "saves:import-osrs-character": "node ./scripts/import-osrs-character.mjs",
     "world-config-docs": "TS_NODE_COMPILER_OPTIONS='{\"target\":\"es2020\"}' ts-node ./scripts/world-config-docs.ts",
     "ensure-cache": "TS_NODE_COMPILER_OPTIONS='{\"target\":\"es2020\"}' ts-node ./scripts/ensure-cache.ts",
+    "test": "node scripts/test-oom-guard.cjs --test --test-concurrency=1 --max-old-space-size=8192 \"tests/**/*.test.cjs\"",
     "test:combat-xp": "TS_NODE_COMPILER_OPTIONS='{\"target\":\"es2020\"}' ts-node ./scripts/combat-xp-smoke.ts",
     "test:weapon-special-traits": "TS_NODE_COMPILER_OPTIONS='{\"target\":\"es2020\"}' ts-node ./scripts/weapon-special-traits-smoke.ts",
     "test:voice-chat": "yarn build && node --test tests/voice-chat.test.cjs",
