@@ -9,26 +9,55 @@ yarn test
 The script is:
 
 ```
-node --test --test-concurrency=1 --max-old-space-size=8192 "tests/**/*.test.cjs"
+node scripts/test-oom-guard.cjs --test --test-concurrency=1 --max-old-space-size=8192 "tests/**/*.test.cjs"
 ```
 
 ## Memory budget
 
-Test runs must not exceed 10 GB of system RAM. `yarn test` enforces that with two
-guards:
+`yarn test` runs test files serially (one worker at a time; tests inside a file
+stay serial), under two layers of memory protection:
 
-- `--test-concurrency=1` — runs test files serially, one worker at a time.
-- `--max-old-space-size=8192` — caps the old-space heap at 8 GB. Node passes it
-  through to the `--test` child processes, so every test file runs under the cap.
+- `--max-old-space-size=8192` — caps the old-space heap at 8 GB per worker.
+  Node passes it through to the `--test` child processes, so every test file
+  runs under the cap. It is a *ceiling* — a file only uses the heap it needs,
+  so the value is portable across machines. A file that retains more than 8 GB
+  of heap dies with `FATAL ERROR: Reached heap limit`: a clean, per-file,
+  readable failure.
+- `scripts/test-oom-guard.cjs` — a wrapper around `node --test` that bounds
+  *total* memory (heap **and** native/out-of-heap). The heap cap does not bound
+  native memory: unbounded `Buffer` captures in a fixture bypass
+  `--max-old-space-size` entirely, and a single worker can otherwise grow
+  without limit (measured: a quest fixture reached 46.3 GB RSS in 44 s under
+  the 8 GB heap cap). The guard polls the system every 2 s and terminates the
+  largest test worker when any trigger fires; the affected file is then
+  reported as a test failure like any other:
+  1. **swap trigger** — swap usage grows more than 512 MB over the run
+     baseline. This is the direct "about to overflow into swap" signal, and it
+     fires first in practice: worker RSS growth stalls in the
+     swap-thrashing zone, so an RSS-only cap triggers too late.
+  2. **floor trigger** — `MemAvailable` (free RAM usable without swapping)
+     falls below the 250 MB reserve for the rest of the system.
+  3. **budget trigger** — a worker's RSS reaches its budget: `MemAvailable` at
+     startup minus 250 MB (floor 256 MB), so the guard adapts to the machine
+     the suite runs on.
 
-Some fixtures retain objects for the lifetime of the file (see below). With the
-default parallel runner every worker accumulates its own copy, and the suite can
-need far more than the budget. Serial plus the 8 GB cap keeps the heaviest file
-(about 5.8 GB heap peak) comfortably under it.
+  Overrides: `OOM_GUARD_MB` (static worker budget in MB) and
+  `OOM_GUARD_MEMINFO` (meminfo file to read; for tests). On non-Linux the
+  wrapper is a transparent pass-through.
 
-If a single file still dies with `FATAL ERROR: Reached heap limit` under the cap,
-that file is retaining more than 8 GB on its own — fix the fixture, do not raise
-the cap.
+Measured worst case (serial, 8 GB heap cap): the heaviest file peaks at
+~12.7 GB RSS, and a full serial run peaks at ~13 GB tree RSS. With the guard,
+the suite is safe on any Linux machine: the test tree cannot push the system
+into swap, and a runaway file fails as a single test failure instead of taking
+the machine down. Verified on the monster fixture: the worker grew to 46.3 GB,
+the swap trigger fired at +0.6 GB swap growth (a blip that fully drained), and
+the file failed cleanly.
+
+If a single file still dies with `FATAL ERROR: Reached heap limit` under the
+cap, that file is retaining more than 8 GB of heap on its own — fix the
+fixture, do not raise the cap. If a file is terminated by the guard (swap,
+floor or budget trigger), it is leaking native or total memory — diagnose it
+with the steps below, watching RSS as well as heap.
 
 ## Why some fixtures retain memory
 
@@ -68,6 +97,27 @@ The file's heap grows monotonically and never drops (about 1 GB at 174k ticks,
 | same, `--max-old-space-size=8192` | completes, ~5.8 GB heap peak |
 | upstream's own single-file run | all 1,553 cases pass, 7.53 GiB peak |
 
+## Native (out-of-heap) leaks
+
+`--max-old-space-size` only bounds the V8 heap. Fixtures whose production
+code paths retain raw buffers out-of-heap — unbounded `Buffer` lists, packet
+captures, native addon state — grow RSS with no heap pressure, and the heap
+cap never sees it.
+
+Example: `tests/dorgeshuun-optional-tour.test.cjs` — a quest fixture whose
+tests run long `p.manager.advance()` loops through the real server plugins.
+Depending on save state, its exercised server paths retain native memory at
+~270 MB/s to ~1 GB/s. Measured under the 8 GB heap cap:
+
+| Run | Result |
+| --- | --- |
+| isolated, allowed to grow | 44.9 GB RSS in ~80 s; the first test hangs with `Promise resolution is still pending but the event loop has already resolved` |
+| isolated, under `test-oom-guard.cjs` | terminated by the guard at 46.3 GB RSS (swap trigger, +0.6 GB swap blip, fully drained); the file fails cleanly |
+| inside the serial suite (fresh save state) | ~12.7 GB RSS, stopped by its own file-level failure at 17.3 s |
+
+Because the growth rate and stopping point are state-dependent, the guard —
+not the heap cap — is the protection for this class of leak.
+
 ## Verifying a genuine leak in a test case
 
 When a test file uses too much memory, establish that it is genuine retention
@@ -81,6 +131,10 @@ When a test file uses too much memory, establish that it is genuine retention
 
    If it dies with `FATAL ERROR: Reached heap limit` before the last test, one
    file alone is retaining memory. Parallelism cannot be the cause.
+
+    For a suspected *native* leak there is no heap limit error: compare
+    `VmRSS` in `/proc/<pid>/status` against the `--trace-gc` heap numbers —
+    RSS growing while the after-GC heap stays flat is out-of-heap retention.
 
 2. **Confirm retention with the GC log** — after-GC heap keeps climbing and stays
    up instead of dropping:
